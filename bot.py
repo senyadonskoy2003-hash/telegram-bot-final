@@ -1,17 +1,17 @@
 import os
 import logging
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("TOKEN")
-ADMIN_ID = 123456789  # 👈 замени на свой
 
 if not TOKEN:
     raise Exception("TOKEN не найден!")
 
-translator = Translator()
+# Инициализация переводчика
+translator = GoogleTranslator(source='auto', target='ru')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -22,13 +22,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     try:
-        translated = translator.translate(text, dest='ru')
+        translated = translator.translate(text)
         await update.message.reply_text(
             f"📝 Оригинал: {text}\n\n"
-            f"✅ Перевод: {translated.text}"
+            f"✅ Перевод: {translated}"
         )
-    except:
+    except Exception as e:
         await update.message.reply_text("❌ Ошибка перевода. Попробуй ещё раз.")
+        logging.error(f"Translation error: {e}")
 
 def main():
     app = Application.builder().token(TOKEN).build()
