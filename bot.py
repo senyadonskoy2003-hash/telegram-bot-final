@@ -12,12 +12,22 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import yfinance as yf
 from yfinance import utils
 
-# Подмена заголовков, чтобы избежать бана
-yf.utils._requests_session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+# ========== ПОДМЕНА USER-AGENT (чтобы Yahoo не банил) ==========
+import yfinance as yf
+import requests
+
+# Создаём свою сессию с браузерными заголовками
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
 })
 
-logging.basicConfig(level=logging.INFO)
+# Принудительно используем нашу сессию в yfinance
+yf.utils._session = session  # новый способ
 TOKEN = os.environ.get("TOKEN")
 
 if not TOKEN:
