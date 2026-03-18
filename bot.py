@@ -252,3 +252,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ Я понимаю только команды:\n"
+        "/price AAPL\n"
+        "/chart AAPL\n"
+        "/rsi AAPL\n"
+        "/signal AAPL\n\n"
+        "Напиши /help для списка команд."
+    )
+
+# И в main() добавь:
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
