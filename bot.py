@@ -9,6 +9,14 @@ from ta.trend import MACD, SMAIndicator
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+import yfinance as yf
+from yfinance import utils
+
+# Подмена заголовков, чтобы избежать бана
+yf.utils._requests_session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+})
+
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("TOKEN")
 
