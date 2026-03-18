@@ -4,11 +4,10 @@ import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import mplfinance as mpf
-from ta import add_all_ta_features
 from ta.momentum import RSIIndicator
 from ta.trend import MACD, SMAIndicator
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("TOKEN")
@@ -16,7 +15,7 @@ TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
     raise Exception("TOKEN не найден!")
 
-# Функция для получения данных
+# ========== Функция получения данных ==========
 def get_stock_data(ticker, period="1mo"):
     try:
         stock = yf.Ticker(ticker)
@@ -25,19 +24,41 @@ def get_stock_data(ticker, period="1mo"):
     except:
         return None, None
 
-# Команда /start
+# ========== Команда /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        ["💰 Цена", "📊 График"],
+        ["📉 RSI", "📈 Сигналы"],
+        ["ℹ️ О боте", "❓ Помощь"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
     await update.message.reply_text(
-        "📈 Привет! Я бот для анализа рынка ценных бумаг\n\n"
-        "Команды:\n"
-        "/price AAPL - цена и объёмы\n"
-        "/chart AAPL - график цены\n"
-        "/rsi AAPL - индикатор RSI\n"
-        "/signal AAPL - сигналы\n"
-        "/help - помощь"
+        "📈 *Биржевой аналитик*\n\n"
+        "Я помогу анализировать акции, криптовалюты и индексы.\n"
+        "Выбери действие на клавиатуре или напиши команду.",
+        parse_mode="Markdown",
+        reply_markup=reply_markup
     )
 
-# Команда /price - цена и объёмы
+# ========== Команда /help ==========
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 *Доступные команды:*\n\n"
+        "/price AAPL - цена, объём, изменение\n"
+        "/chart AAPL 1mo - график (1d, 5d, 1mo, 3mo, 1y)\n"
+        "/rsi AAPL - RSI индикатор с графиком\n"
+        "/signal AAPL - торговые сигналы\n"
+        "/help - это меню\n\n"
+        "Примеры тикеров:\n"
+        "• Акции: AAPL, TSLA, MSFT\n"
+        "• Крипта: BTC-USD, ETH-USD\n"
+        "• Валюты: EURUSD=X\n"
+        "• Индексы: ^GSPC (S&P 500)",
+        parse_mode="Markdown"
+    )
+
+# ========== Команда /price ==========
 async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи тикер, например: /price AAPL")
@@ -70,7 +91,7 @@ async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-# Команда /chart - график цены
+# ========== Команда /chart ==========
 async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи тикер, например: /chart AAPL")
@@ -107,7 +128,6 @@ async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         figsize=(12, 8)
     )
     
-    # Сохраняем во временный файл
     plt.savefig('chart.png', bbox_inches='tight')
     plt.close()
     
@@ -116,7 +136,7 @@ async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     os.remove('chart.png')
 
-# Команда /rsi - индикатор RSI
+# ========== Команда /rsi ==========
 async def rsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи тикер, например: /rsi AAPL")
@@ -167,7 +187,7 @@ async def rsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     os.remove('rsi.png')
 
-# Команда /signal - сигналы
+# ========== Команда /signal ==========
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("❌ Укажи тикер, например: /signal AAPL")
@@ -224,35 +244,31 @@ async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(signal_text, parse_mode="Markdown")
 
-# Команда /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 *Доступные команды:*\n\n"
-        "/price AAPL - цена, объём, изменение\n"
-        "/chart AAPL 1mo - график (1d, 5d, 1mo, 3mo, 1y)\n"
-        "/rsi AAPL - RSI индикатор с графиком\n"
-        "/signal AAPL - торговые сигналы\n"
-        "/help - это меню\n\n"
-        "Примеры тикеров: AAPL, TSLA, BTC-USD, EURUSD=X",
-        parse_mode="Markdown"
-    )
-
-def main():
-    app = Application.builder().token(TOKEN).build()
+# ========== Обработчик кнопок ==========
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("price", price))
-    app.add_handler(CommandHandler("chart", chart))
-    app.add_handler(CommandHandler("rsi", rsi))
-    app.add_handler(CommandHandler("signal", signal))
-    
-    print("🤖 Бот запущен!")
-    app.run_polling()
+    if text == "💰 Цена":
+        await update.message.reply_text("📝 Напиши: /price AAPL (или любой другой тикер)")
+    elif text == "📊 График":
+        await update.message.reply_text("📝 Напиши: /chart AAPL (или /chart BTC-USD 3mo)")
+    elif text == "📉 RSI":
+        await update.message.reply_text("📝 Напиши: /rsi AAPL")
+    elif text == "📈 Сигналы":
+        await update.message.reply_text("📝 Напиши: /signal AAPL")
+    elif text == "ℹ️ О боте":
+        await update.message.reply_text(
+            "🤖 *Биржевой аналитик*\n\n"
+            "Версия: 1.0\n"
+            "Данные: Yahoo Finance\n"
+            "Технический анализ: RSI, MACD, скользящие средние\n\n"
+            "⚠️ Данные не являются инвестиционной рекомендацией.",
+            parse_mode="Markdown"
+        )
+    elif text == "❓ Помощь":
+        await help_command(update, context)
 
-if __name__ == "__main__":
-    main()
-
+# ========== Обработчик обычного текста ==========
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "❓ Я понимаю только команды:\n"
@@ -260,8 +276,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/chart AAPL\n"
         "/rsi AAPL\n"
         "/signal AAPL\n\n"
-        "Напиши /help для списка команд."
+        "Или используй кнопки внизу экрана 👇"
     )
 
-# И в main() добавь:
+# ========== Запуск бота ==========
+def main():
+    app = Application.builder().token(TOKEN).build()
+    
+    # Команды
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("price", price))
+    app.add_handler(CommandHandler("chart", chart))
+    app.add_handler(CommandHandler("rsi", rsi))
+    app.add_handler(CommandHandler("signal", signal))
+    
+    # Обработчики кнопок
+    app.add_handler(MessageHandler(filters.Regex('^(💰 Цена|📊 График|📉 RSI|📈 Сигналы|ℹ️ О боте|❓ Помощь)$'), handle_buttons))
+    
+    # Обработчик обычного текста
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    
+    print("🤖 Биржевой бот запущен!")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
