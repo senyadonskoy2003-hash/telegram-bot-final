@@ -1,346 +1,280 @@
 import os
 import logging
-import requests
-import pandas as pd
-import matplotlib.pyplot as plt
-import mplfinance as mpf
-from ta.momentum import RSIIndicator
-from ta.trend import MACD, SMAIndicator
+import asyncio
+import re
+from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("TOKEN")
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY")
 
 if not TOKEN:
     raise Exception("TOKEN не найден!")
-if not ALPHA_VANTAGE_KEY:
-    raise Exception("ALPHA_VANTAGE_KEY не найден!")
 
-# ========== Функции для работы с Alpha Vantage ==========
+# Состояния для диалога
+TEXT, TIME = range(2)
 
-def get_quote(ticker):
-    """Получить текущую цену и объём"""
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {
-            'function': 'GLOBAL_QUOTE',
-            'symbol': ticker,
-            'apikey': ALPHA_VANTAGE_KEY
-        }
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if 'Global Quote' in data and data['Global Quote']:
-            quote = data['Global Quote']
-            return {
-                'price': float(quote.get('05. price', 0)),
-                'change': float(quote.get('09. change', 0)),
-                'change_percent': float(quote.get('10. change percent', '0%').replace('%', '')),
-                'volume': int(quote.get('06. volume', 0))
-            }
-        return None
-    except Exception as e:
-        logging.error(f"Alpha Vantage quote error: {e}")
-        return None
-
-def get_historical(ticker, outputsize='compact'):
-    """Получить исторические данные (до 100 дней)"""
-    try:
-        url = "https://www.alphavantage.co/query"
-        params = {
-            'function': 'TIME_SERIES_DAILY',
-            'symbol': ticker,
-            'outputsize': outputsize,
-            'apikey': ALPHA_VANTAGE_KEY
-        }
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if 'Time Series (Daily)' in data:
-            df = pd.DataFrame.from_dict(data['Time Series (Daily)'], orient='index')
-            df = df.astype(float)
-            df.index = pd.to_datetime(df.index)
-            df = df.sort_index()
-            df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-            return df
-        return None
-    except Exception as e:
-        logging.error(f"Alpha Vantage historical error: {e}")
-        return None
+# Хранилище напоминаний {chat_id: [(время, текст)]}
+reminders = {}
 
 # ========== Команда /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        ["💰 Цена", "📊 График"],
-        ["📉 RSI", "📈 Сигналы"],
-        ["ℹ️ О боте", "❓ Помощь"]
+        ["📝 Добавить напоминание"],
+        ["📋 Мои напоминания"],
+        ["❌ Удалить напоминание"],
+        ["❓ Помощь"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
-        "📈 *Биржевой аналитик (Alpha Vantage)*\n\n"
-        "Я помогу анализировать акции, криптовалюты и индексы.\n"
-        "Выбери действие на клавиатуре или напиши команду.",
+        "⏰ *Бот-напоминалка*\n\n"
+        "Я помогу тебе ничего не забыть!\n\n"
+        "👇 Нажимай кнопки и я проведу тебя шаг за шагом.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
+    return ConversationHandler.END
 
-# ========== Команда /help ==========
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== Начало добавления напоминания ==========
+async def add_reminder_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 *Доступные команды:*\n\n"
-        "/price AAPL - цена, объём, изменение\n"
-        "/chart AAPL - график цены\n"
-        "/rsi AAPL - RSI индикатор с графиком\n"
-        "/signal AAPL - торговые сигналы\n"
-        "/help - это меню\n\n"
-        "Примеры тикеров:\n"
-        "• Акции: AAPL, TSLA, MSFT\n"
-        "• Крипта: BTC, ETH\n"
-        "• Валюты: EUR, RUB\n"
-        "• Индексы: SPX, DJI\n\n"
-        "⚠️ Бесплатный тариф: 5 запросов в минуту",
+        "📝 Напиши мне *текст напоминания*:\n"
+        "Например: купить хлеб, позвонить маме, оплатить счёт",
         parse_mode="Markdown"
     )
+    return TEXT
 
-# ========== Команда /price ==========
-async def price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Укажи тикер, например: /price AAPL")
-        return
+# ========== Получаем текст напоминания ==========
+async def add_reminder_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['reminder_text'] = update.message.text
     
-    ticker = context.args[0].upper()
-    data = get_quote(ticker)
-    
-    if data:
-        arrow = "🟢" if data['change'] > 0 else "🔴" if data['change'] < 0 else "⚪"
-        await update.message.reply_text(
-            f"{arrow} *{ticker}*\n\n"
-            f"💰 Цена: ${data['price']:.2f}\n"
-            f"📊 Изменение: {data['change']:+.2f} ({data['change_percent']:+.2f}%)\n"
-            f"📦 Объём: {data['volume']:,}",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ Тикер {ticker} не найден или превышен лимит запросов.\n"
-            f"Попробуй через минуту."
-        )
-
-# ========== Команда /chart ==========
-async def chart(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Укажи тикер, например: /chart AAPL")
-        return
-    
-    ticker = context.args[0].upper()
-    df = get_historical(ticker)
-    
-    if df is None or df.empty:
-        await update.message.reply_text(f"❌ Не удалось получить данные для {ticker}")
-        return
-    
-    # Берём последние 30 дней для графика
-    df = df.tail(30)
-    
-    # Создаём свечной график
-    mc = mpf.make_marketcolors(up='g', down='r', wick='inherit', volume='in')
-    s = mpf.make_mpf_style(marketcolors=mc)
-    
-    # Добавляем скользящие средние
-    apds = [
-        mpf.make_addplot(df['Close'].rolling(window=20).mean(), color='blue', width=0.8, label='MA20'),
-        mpf.make_addplot(df['Close'].rolling(window=50).mean(), color='orange', width=0.8, label='MA50')
-    ]
-    
-    # Сохраняем график
-    fig, axes = mpf.plot(
-        df, 
-        type='candle',
-        style=s,
-        volume=True,
-        addplot=apds,
-        title=f"{ticker} - последние 30 дней",
-        returnfig=True,
-        figsize=(12, 8)
+    await update.message.reply_text(
+        "⏰ Теперь напиши *время* в одном из форматов:\n\n"
+        "• `18:30` — сегодня в 18:30\n"
+        "• `завтра 10:00` — завтра в 10:00\n"
+        "• `через 2 часа` — через 2 часа от сейчас\n"
+        "• `25.03 15:00` — конкретная дата",
+        parse_mode="Markdown"
     )
-    
-    plt.savefig('chart.png', bbox_inches='tight')
-    plt.close()
-    
-    with open('chart.png', 'rb') as f:
-        await update.message.reply_photo(f)
-    
-    os.remove('chart.png')
+    return TIME
 
-# ========== Команда /rsi ==========
-async def rsi(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Укажи тикер, например: /rsi AAPL")
-        return
+# ========== Получаем время и сохраняем ==========
+async def add_reminder_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    text = update.message.text.lower()
+    reminder_text = context.user_data.get('reminder_text', 'Напоминание')
     
-    ticker = context.args[0].upper()
-    df = get_historical(ticker, outputsize='full')
+    now = datetime.now()
+    reminder_time = None
     
-    if df is None or df.empty:
-        await update.message.reply_text(f"❌ Не удалось получить данные для {ticker}")
-        return
+    # Формат: ЧЧ:ММ
+    time_match = re.search(r'(\d{1,2}):(\d{2})', text)
     
-    # Берём последние 60 дней для RSI
-    df = df.tail(60)
+    # Формат: завтра
+    if 'завтра' in text and time_match:
+        hours = int(time_match.group(1))
+        minutes = int(time_match.group(2))
+        reminder_time = now.replace(hour=hours, minute=minutes, second=0, microsecond=0) + timedelta(days=1)
     
-    # Рассчитываем RSI
-    rsi_indicator = RSIIndicator(df['Close'], window=14)
-    rsi = rsi_indicator.rsi()
-    current_rsi = rsi.iloc[-1]
+    # Формат: через X часов
+    elif 'через' in text and 'час' in text:
+        hours_match = re.search(r'через\s+(\d+)\s+час', text)
+        if hours_match:
+            hours = int(hours_match.group(1))
+            reminder_time = now + timedelta(hours=hours)
     
-    # Создаём график RSI
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
+    # Формат: только время (сегодня)
+    elif time_match and not 'завтра' in text:
+        hours = int(time_match.group(1))
+        minutes = int(time_match.group(2))
+        reminder_time = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        if reminder_time < now:
+            reminder_time += timedelta(days=1)
     
-    # Цена
-    ax1.plot(df.index, df['Close'], label='Цена', color='black')
-    ax1.set_title(f'{ticker} - Цена и RSI')
-    ax1.legend()
-    ax1.grid(True)
+    # Формат: дата (например 25.03 15:00)
+    date_match = re.search(r'(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{2})', text)
+    if date_match:
+        day = int(date_match.group(1))
+        month = int(date_match.group(2))
+        hours = int(date_match.group(3))
+        minutes = int(date_match.group(4))
+        year = now.year
+        reminder_time = datetime(year, month, day, hours, minutes)
+        if reminder_time < now:
+            reminder_time = reminder_time.replace(year=year + 1)
     
-    # RSI
-    ax2.plot(df.index, rsi, label='RSI', color='purple')
-    ax2.axhline(y=70, color='r', linestyle='--', alpha=0.5, label='Перекупленность (70)')
-    ax2.axhline(y=30, color='g', linestyle='--', alpha=0.5, label='Перепроданность (30)')
-    ax2.fill_between(df.index, 30, 70, alpha=0.1, color='gray')
-    ax2.set_ylim(0, 100)
-    ax2.legend()
-    ax2.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig('rsi.png')
-    plt.close()
-    
-    status = "🟢 Перепродан (возможен рост)" if current_rsi < 30 else "🔴 Перекуплен (возможна коррекция)" if current_rsi > 70 else "⚪ Нейтральная зона"
-    
-    with open('rsi.png', 'rb') as f:
-        await update.message.reply_photo(
-            f, 
-            caption=f"*{ticker}* - RSI: {current_rsi:.1f}\n{status}",
+    if reminder_time:
+        # Сохраняем
+        if chat_id not in reminders:
+            reminders[chat_id] = []
+        reminders[chat_id].append((reminder_time, reminder_text))
+        
+        # Запускаем задачу
+        asyncio.create_task(send_reminder(chat_id, reminder_time, reminder_text, context.application))
+        
+        await update.message.reply_text(
+            f"✅ *Готово!*\n\n"
+            f"📝 Текст: {reminder_text}\n"
+            f"⏰ Время: {reminder_time.strftime('%d.%m.%Y в %H:%M')}\n\n"
+            f"Я напомню тебе в это время 👌",
             parse_mode="Markdown"
         )
+    else:
+        await update.message.reply_text(
+            "❌ Не понял время. Попробуй ещё раз:\n"
+            "• `18:30`\n"
+            "• `завтра 10:00`\n"
+            "• `через 2 часа`"
+        )
+        return TIME
     
-    os.remove('rsi.png')
+    return ConversationHandler.END
 
-# ========== Команда /signal ==========
-async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("❌ Укажи тикер, например: /signal AAPL")
-        return
+# ========== Показать список напоминаний ==========
+async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     
-    ticker = context.args[0].upper()
-    df = get_historical(ticker, outputsize='full')
-    
-    if df is None or df.empty:
-        await update.message.reply_text(f"❌ Не удалось получить данные для {ticker}")
-        return
-    
-    # Индикаторы
-    rsi = RSIIndicator(df['Close'], window=14).rsi().iloc[-1]
-    macd = MACD(df['Close']).macd().iloc[-1]
-    macd_signal = MACD(df['Close']).macd_signal().iloc[-1]
-    ma20 = SMAIndicator(df['Close'], window=20).sma_indicator().iloc[-1]
-    ma50 = SMAIndicator(df['Close'], window=50).sma_indicator().iloc[-1]
-    current = df['Close'].iloc[-1]
-    
-    signals = []
-    
-    # RSI сигналы
-    if rsi < 30:
-        signals.append("🟢 RSI: перепроданность (сигнал к покупке)")
-    elif rsi > 70:
-        signals.append("🔴 RSI: перекупленность (сигнал к продаже)")
+    if chat_id in reminders and reminders[chat_id]:
+        # Сортируем по времени
+        sorted_reminders = sorted(reminders[chat_id], key=lambda x: x[0])
+        
+        msg = "📋 *Твои напоминания:*\n\n"
+        for i, (rem_time, rem_text) in enumerate(sorted_reminders, 1):
+            msg += f"{i}. {rem_time.strftime('%d.%m %H:%M')} — {rem_text}\n"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
     else:
-        signals.append("⚪ RSI: нейтрально")
+        await update.message.reply_text("📭 У тебя нет активных напоминаний.")
     
-    # MACD сигналы
-    if macd > macd_signal:
-        signals.append("🟢 MACD: бычий сигнал (выше сигнальной)")
-    else:
-        signals.append("🔴 MACD: медвежий сигнал (ниже сигнальной)")
-    
-    # Скользящие средние
-    if current > ma20 and current > ma50:
-        signals.append("🟢 Цена выше MA20 и MA50 (восходящий тренд)")
-    elif current < ma20 and current < ma50:
-        signals.append("🔴 Цена ниже MA20 и MA50 (нисходящий тренд)")
-    else:
-        signals.append("⚪ Смешанные сигналы по MA")
-    
-    # Объёмы
-    avg_volume = df['Volume'].mean()
-    last_volume = df['Volume'].iloc[-1]
-    if last_volume > avg_volume * 1.5:
-        signals.append(f"📊 Аномальный объём: {last_volume/avg_volume:.1f}x от среднего")
-    
-    signal_text = f"*{ticker} - Сигналы*\n\n"
-    signal_text += "\n".join(signals)
-    signal_text += f"\n\n💰 Текущая цена: ${current:.2f}"
-    
-    await update.message.reply_text(signal_text, parse_mode="Markdown")
+    return ConversationHandler.END
 
-# ========== Обработчик кнопок ==========
-async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== Начало удаления напоминания ==========
+async def delete_reminder_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if chat_id in reminders and reminders[chat_id]:
+        sorted_reminders = sorted(reminders[chat_id], key=lambda x: x[0])
+        context.user_data['sorted_reminders'] = sorted_reminders
+        
+        msg = "🗑 *Выбери номер напоминания для удаления:*\n\n"
+        for i, (rem_time, rem_text) in enumerate(sorted_reminders, 1):
+            msg += f"{i}. {rem_time.strftime('%d.%m %H:%M')} — {rem_text}\n"
+        msg += "\n❌ Отправь *0* для отмены"
+        
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return 0  # следующее сообщение обработается в delete_reminder_choose
+    else:
+        await update.message.reply_text("📭 У тебя нет активных напоминаний.")
+        return ConversationHandler.END
+
+# ========== Обработка выбора для удаления ==========
+async def delete_reminder_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     text = update.message.text
     
-    if text == "💰 Цена":
-        await update.message.reply_text("📝 Напиши: /price AAPL (или любой другой тикер)")
-    elif text == "📊 График":
-        await update.message.reply_text("📝 Напиши: /chart AAPL")
-    elif text == "📉 RSI":
-        await update.message.reply_text("📝 Напиши: /rsi AAPL")
-    elif text == "📈 Сигналы":
-        await update.message.reply_text("📝 Напиши: /signal AAPL")
-    elif text == "ℹ️ О боте":
-        await update.message.reply_text(
-            "🤖 *Биржевой аналитик (Alpha Vantage)*\n\n"
-            "Версия: 2.0\n"
-            "Данные: Alpha Vantage\n"
-            "Технический анализ: RSI, MACD, скользящие средние\n"
-            "Лимит: 5 запросов в минуту\n\n"
-            "⚠️ Данные не являются инвестиционной рекомендацией.",
-            parse_mode="Markdown"
-        )
-    elif text == "❓ Помощь":
-        await help_command(update, context)
+    if text == "0":
+        await update.message.reply_text("❌ Удаление отменено.")
+        return ConversationHandler.END
+    
+    try:
+        num = int(text) - 1
+        sorted_reminders = context.user_data.get('sorted_reminders', [])
+        
+        if 0 <= num < len(sorted_reminders):
+            # Находим оригинальное напоминание в reminders
+            rem_to_delete = sorted_reminders[num]
+            original_list = reminders.get(chat_id, [])
+            
+            # Удаляем по содержимому (время + текст)
+            reminders[chat_id] = [(t, txt) for t, txt in original_list if t != rem_to_delete[0] or txt != rem_to_delete[1]]
+            
+            if not reminders[chat_id]:
+                del reminders[chat_id]
+            
+            await update.message.reply_text(f"✅ Напоминание «{rem_to_delete[1]}» удалено.")
+        else:
+            await update.message.reply_text("❌ Неверный номер.")
+    except ValueError:
+        await update.message.reply_text("❌ Введи число.")
+    
+    return ConversationHandler.END
 
-# ========== Обработчик обычного текста ==========
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ========== Помощь ==========
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "❓ Я понимаю только команды:\n"
-        "/price AAPL\n"
-        "/chart AAPL\n"
-        "/rsi AAPL\n"
-        "/signal AAPL\n\n"
-        "Или используй кнопки внизу экрана 👇"
+        "📚 *Как пользоваться ботом:*\n\n"
+        "1️⃣ *Добавить напоминание*\n"
+        "   Нажми кнопку и следуй шагам\n\n"
+        "2️⃣ *Посмотреть список*\n"
+        "   Нажми «Мои напоминания»\n\n"
+        "3️⃣ *Удалить*\n"
+        "   Нажми «Удалить напоминание» и выбери номер\n\n"
+        "4️⃣ *Форматы времени*\n"
+        "   • 18:30\n"
+        "   • завтра 10:00\n"
+        "   • через 2 часа\n"
+        "   • 25.03 15:00",
+        parse_mode="Markdown"
     )
+    return ConversationHandler.END
+
+# ========== Функция отправки напоминания ==========
+async def send_reminder(chat_id: int, reminder_time: datetime, reminder_text: str, app):
+    now = datetime.now()
+    delay = (reminder_time - now).total_seconds()
+    
+    if delay > 0:
+        await asyncio.sleep(delay)
+        
+        try:
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ *Напоминание!*\n\n{reminder_text}",
+                parse_mode="Markdown"
+            )
+            # Удаляем из списка после отправки
+            if chat_id in reminders:
+                reminders[chat_id] = [(t, txt) for t, txt in reminders[chat_id] if t != reminder_time]
+        except Exception as e:
+            logging.error(f"Ошибка отправки напоминания: {e}")
+
+# ========== Отмена диалога ==========
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Действие отменено.")
+    return ConversationHandler.END
 
 # ========== Запуск бота ==========
 def main():
     app = Application.builder().token(TOKEN).build()
     
-    # Команды
+    # Диалог добавления напоминания
+    conv_handler_add = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^📝 Добавить напоминание$'), add_reminder_start)],
+        states={
+            TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_reminder_text)],
+            TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_reminder_time)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    # Диалог удаления напоминания
+    conv_handler_delete = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^❌ Удалить напоминание$'), delete_reminder_start)],
+        states={
+            0: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_reminder_choose)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("price", price))
-    app.add_handler(CommandHandler("chart", chart))
-    app.add_handler(CommandHandler("rsi", rsi))
-    app.add_handler(CommandHandler("signal", signal))
+    app.add_handler(MessageHandler(filters.Regex('^📋 Мои напоминания$'), list_reminders))
+    app.add_handler(conv_handler_add)
+    app.add_handler(conv_handler_delete)
     
-    # Обработчики кнопок
-    app.add_handler(MessageHandler(filters.Regex('^(💰 Цена|📊 График|📉 RSI|📈 Сигналы|ℹ️ О боте|❓ Помощь)$'), handle_buttons))
-    
-    # Обработчик обычного текста
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    print("🤖 Биржевой бот (Alpha Vantage) запущен!")
+    print("🤖 Бот-напоминалка (с диалогами) запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
