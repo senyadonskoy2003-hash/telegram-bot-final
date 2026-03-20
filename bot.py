@@ -106,7 +106,7 @@ scheduler = AsyncIOScheduler()
 
 async def check_reminders(app):
     """Проверяет и отправляет просроченные напоминания"""
-    now = datetime.now() + MSK_OFFSET
+    now = datetime.now() + MSK_OFFSET = timedelta(hours=3)
     logging.info(f"🔍 Проверка напоминаний в {now.strftime('%H:%M:%S')}")
     
     due = get_due_reminders()
