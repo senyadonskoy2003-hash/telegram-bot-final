@@ -11,7 +11,6 @@ from telegram.ext import (
     CallbackQueryHandler
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 
@@ -29,7 +28,6 @@ def init_db():
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
     
-    # Одноразовые напоминания
     c.execute('''CREATE TABLE IF NOT EXISTS one_time
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   chat_id INTEGER,
@@ -37,15 +35,14 @@ def init_db():
                   remind_time TIMESTAMP,
                   done BOOLEAN DEFAULT 0)''')
     
-    # Повторяющиеся напоминания
     c.execute('''CREATE TABLE IF NOT EXISTS recurring
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   chat_id INTEGER,
                   text TEXT,
-                  pattern TEXT,  -- daily, weekly, monthly
-                  time TEXT,      -- время в формате HH:MM
-                  day_of_week INTEGER,  -- 0-6 для weekly
-                  day_of_month INTEGER, -- 1-31 для monthly
+                  pattern TEXT,
+                  time TEXT,
+                  day_of_week INTEGER,
+                  day_of_month INTEGER,
                   active BOOLEAN DEFAULT 1)''')
     
     conn.commit()
@@ -65,6 +62,7 @@ def add_one_time(chat_id, text, remind_time):
     return reminder_id
 
 def get_due_reminders():
+    """Возвращает все просроченные напоминания"""
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
     now = datetime.now()
@@ -80,27 +78,13 @@ def mark_done(reminder_id):
     conn.commit()
     conn.close()
 
-def add_recurring(chat_id, text, pattern, time_str, day_of_week=None, day_of_month=None):
-    conn = sqlite3.connect('reminders.db')
-    c = conn.cursor()
-    c.execute("""INSERT INTO recurring 
-                 (chat_id, text, pattern, time, day_of_week, day_of_month) 
-                 VALUES (?, ?, ?, ?, ?, ?)""",
-              (chat_id, text, pattern, time_str, day_of_week, day_of_month))
-    reminder_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return reminder_id
-
 def get_user_reminders(chat_id):
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
     
-    # Одноразовые
     c.execute("SELECT id, text, remind_time FROM one_time WHERE chat_id = ? AND done = 0 ORDER BY remind_time", (chat_id,))
     one_time = c.fetchall()
     
-    # Повторяющиеся
     c.execute("SELECT id, text, pattern, time FROM recurring WHERE chat_id = ? AND active = 1", (chat_id,))
     recurring = c.fetchall()
     
@@ -122,8 +106,14 @@ scheduler = AsyncIOScheduler()
 
 async def check_reminders(app):
     """Проверяет и отправляет просроченные напоминания"""
+    now = datetime.now()
+    logging.info(f"🔍 Проверка напоминаний в {now.strftime('%H:%M:%S')}")
+    
     due = get_due_reminders()
+    logging.info(f"📋 Найдено просроченных: {len(due)}")
+    
     for reminder_id, chat_id, text in due:
+        logging.info(f"📤 Отправляю напоминание {reminder_id} пользователю {chat_id}: {text}")
         try:
             # Создаём клавиатуру для откладывания
             keyboard = [
@@ -140,188 +130,77 @@ async def check_reminders(app):
                 parse_mode="Markdown",
                 reply_markup=reply_markup
             )
+            logging.info(f"✅ Напоминание {reminder_id} отправлено")
         except Exception as e:
-            logging.error(f"Ошибка отправки: {e}")
-
-# ========== Inline-календарь ==========
-def create_calendar(year=None, month=None):
-    """Создаёт инлайн-клавиатуру календаря"""
-    now = datetime.now()
-    year = year or now.year
-    month = month or now.month
-    
-    keyboard = []
-    
-    # Заголовок с месяцем и годом
-    header = [InlineKeyboardButton(f"{year} - {month:02d}", callback_data="ignore")]
-    keyboard.append(header)
-    
-    # Дни недели
-    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    keyboard.append([InlineKeyboardButton(day, callback_data="ignore") for day in week_days])
-    
-    # Пустые ячейки перед первым днём месяца
-    first_day = datetime(year, month, 1).weekday()
-    empty_cells = first_day
-    row = []
-    for _ in range(empty_cells):
-        row.append(InlineKeyboardButton(" ", callback_data="ignore"))
-    
-    # Дни месяца
-    if month == 12:
-        next_month = datetime(year+1, 1, 1)
-    else:
-        next_month = datetime(year, month+1, 1)
-    
-    last_day = (next_month - timedelta(days=1)).day
-    
-    for day in range(1, last_day + 1):
-        if len(row) == 7:
-            keyboard.append(row)
-            row = []
-        row.append(InlineKeyboardButton(str(day), callback_data=f"calendar_{year}-{month:02d}-{day:02d}"))
-    
-    if row:
-        keyboard.append(row)
-    
-    # Навигация
-    nav_row = []
-    if month > 1:
-        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"prev_{year}_{month-1}"))
-    else:
-        nav_row.append(InlineKeyboardButton("◀️", callback_data=f"prev_{year-1}_{12}"))
-    
-    nav_row.append(InlineKeyboardButton("✅ Выбрать", callback_data="ignore"))
-    
-    if month < 12:
-        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"next_{year}_{month+1}"))
-    else:
-        nav_row.append(InlineKeyboardButton("▶️", callback_data=f"next_{year+1}_{1}"))
-    
-    keyboard.append(nav_row)
-    
-    return InlineKeyboardMarkup(keyboard)
+            logging.error(f"❌ Ошибка отправки {reminder_id}: {e}")
 
 # ========== Команда /start ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ["📝 Добавить напоминание"],
-        ["🔄 Повторяющееся"],
         ["📋 Мои напоминания"],
         ["❌ Удалить напоминание"],
-        ["❓ Помощь"]
+        ["❓ Помощь"],
+        ["🕒 Время сервера"]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
     await update.message.reply_text(
         "⏰ *Бот-напоминалка*\n\n"
-        "✨ Новые возможности:\n"
-        "• 🔁 Повторяющиеся напоминания\n"
-        "• ⏰ Кнопка «Отложить»\n"
-        "• 💾 База данных (ничего не пропадает)\n"
-        "• 📅 Календарь для выбора даты",
+        "Я помогу тебе ничего не забыть!\n\n"
+        "👇 Нажимай кнопки и я проведу тебя шаг за шагом.",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
     return ConversationHandler.END
 
-# ========== Добавление напоминания ==========
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📅 Выбрать дату", callback_data="show_calendar")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
+# ========== Время сервера ==========
+async def show_server_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
     await update.message.reply_text(
-        "📝 Напиши *текст напоминания*:",
-        parse_mode="Markdown",
-        reply_markup=reply_markup
-    )
-    context.user_data['adding_type'] = 'one_time'
-    return TEXT
-
-async def add_recurring_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📝 Напиши *текст повторяющегося напоминания*:",
+        f"🕒 *Время на сервере (UTC):*\n"
+        f"`{now.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+        f"📌 Если твоё время отличается, напоминания могут приходить не вовремя.",
         parse_mode="Markdown"
     )
-    context.user_data['adding_type'] = 'recurring'
+
+# ========== Проверка БД ==========
+async def check_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect('reminders.db')
+    c = conn.cursor()
+    
+    c.execute("SELECT id, text, remind_time, done FROM one_time WHERE done = 0")
+    one_time = c.fetchall()
+    conn.close()
+    
+    if one_time:
+        msg = "📋 *Неотправленные напоминания:*\n\n"
+        for rid, text, rtime, done in one_time:
+            msg += f"• ID:{rid} | {rtime} — {text[:30]}\n"
+    else:
+        msg = "📭 Нет неотправленных напоминаний"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# ========== Добавление напоминания ==========
+async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📝 Напиши *текст напоминания*:",
+        parse_mode="Markdown"
+    )
     return TEXT
 
 async def add_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reminder_text'] = update.message.text
-    
-    if context.user_data.get('adding_type') == 'recurring':
-        await update.message.reply_text(
-            "🔄 *Выбери периодичность:*\n\n"
-            "• `каждый день в 09:00`\n"
-            "• `каждый понедельник в 10:00`\n"
-            "• `каждое 15 число в 18:00`\n\n"
-            "Или введи вручную:",
-            parse_mode="Markdown"
-        )
-        return RECURRING
-    else:
-        await update.message.reply_text(
-            "⏰ Выбери *дату и время* через календарь 👇\n"
-            "Или напиши в формате: 18:30, завтра 10:00, 25.03 15:00",
-            parse_mode="Markdown"
-        )
-        return TIME
-
-async def add_recurring_parse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text.lower()
-    reminder_text = context.user_data.get('reminder_text', 'Напоминание')
-    
-    # Парсим повторяющееся напоминание
-    time_match = re.search(r'(\d{1,2}):(\d{2})', text)
-    
-    if not time_match:
-        await update.message.reply_text("❌ Не могу найти время. Пример: каждый день в 09:00")
-        return RECURRING
-    
-    hours = int(time_match.group(1))
-    minutes = int(time_match.group(2))
-    time_str = f"{hours:02d}:{minutes:02d}"
-    
-    if 'каждый день' in text:
-        pattern = 'daily'
-        add_recurring(chat_id, reminder_text, pattern, time_str)
-        await update.message.reply_text(f"✅ Добавлено: каждый день в {time_str} — {reminder_text}")
-        
-    elif 'понедельник' in text:
-        pattern = 'weekly'
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=0)
-        await update.message.reply_text(f"✅ Добавлено: каждый понедельник в {time_str} — {reminder_text}")
-    elif 'вторник' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=1)
-    elif 'среда' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=2)
-    elif 'четверг' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=3)
-    elif 'пятница' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=4)
-    elif 'суббота' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=5)
-    elif 'воскресенье' in text:
-        add_recurring(chat_id, reminder_text, pattern, time_str, day_of_week=6)
-        
-    elif 'число' in text:
-        day_match = re.search(r'(\d{1,2})\s+число', text)
-        if day_match:
-            day = int(day_match.group(1))
-            pattern = 'monthly'
-            add_recurring(chat_id, reminder_text, pattern, time_str, day_of_month=day)
-            await update.message.reply_text(f"✅ Добавлено: каждого {day} числа в {time_str} — {reminder_text}")
-        else:
-            await update.message.reply_text("❌ Не могу найти число. Пример: каждое 15 число в 18:00")
-            return RECURRING
-    else:
-        await update.message.reply_text("❌ Не могу определить периодичность")
-        return RECURRING
-    
-    return ConversationHandler.END
+    await update.message.reply_text(
+        "⏰ Теперь напиши *время* в одном из форматов:\n\n"
+        "• `18:30` — сегодня в 18:30\n"
+        "• `завтра 10:00` — завтра в 10:00\n"
+        "• `через 2 часа` — через 2 часа\n"
+        "• `20.03 15:00` — конкретная дата",
+        parse_mode="Markdown"
+    )
+    return TIME
 
 async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -350,6 +229,7 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if remind_time < now:
             remind_time += timedelta(days=1)
     
+    # Формат: дата (например 20.03 15:00)
     date_match = re.search(r'(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{2})', text)
     if date_match:
         day = int(date_match.group(1))
@@ -357,90 +237,30 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hours = int(date_match.group(3))
         minutes = int(date_match.group(4))
         year = now.year
-        remind_time = datetime(year, month, day, hours, minutes)
-        if remind_time < now:
-            remind_time = remind_time.replace(year=year + 1)
+        try:
+            remind_time = datetime(year, month, day, hours, minutes)
+            if remind_time < now:
+                remind_time = remind_time.replace(year=year + 1)
+        except:
+            pass
     
     if remind_time:
+        # Сохраняем в БД
         reminder_id = add_one_time(chat_id, reminder_text, remind_time)
-        
-        # Добавляем в планировщик
-        scheduler.add_job(
-            check_reminders,
-            trigger=DateTrigger(run_date=remind_time),
-            args=[context.application],
-            id=f"reminder_{reminder_id}"
-        )
         
         await update.message.reply_text(
             f"✅ *Готово!*\n\n"
             f"📝 {reminder_text}\n"
-            f"⏰ {remind_time.strftime('%d.%m.%Y в %H:%M')}",
+            f"⏰ {remind_time.strftime('%d.%m.%Y в %H:%M')} (UTC)\n\n"
+            f"💡 Напоминание придет в указанное время",
             parse_mode="Markdown"
         )
+        logging.info(f"✅ Сохранено напоминание #{reminder_id}: {reminder_text} на {remind_time}")
     else:
         await update.message.reply_text("❌ Не понял время. Попробуй ещё раз.")
         return TIME
     
     return ConversationHandler.END
-
-# ========== Обработка календаря ==========
-async def calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data.startswith('calendar_'):
-        date_str = data.replace('calendar_', '')
-        selected_date = datetime.strptime(date_str, '%Y-%m-%d')
-        context.user_data['selected_date'] = selected_date
-        
-        # Запрашиваем время
-        await query.edit_message_text(
-            f"📅 Выбрана дата: {selected_date.strftime('%d.%m.%Y')}\n"
-            f"⏰ Теперь напиши время (например, 18:30):"
-        )
-        return TIME
-    
-    elif data.startswith('prev_'):
-        _, year, month = data.split('_')
-        calendar = create_calendar(int(year), int(month))
-        await query.edit_message_text("📅 Выбери дату:", reply_markup=calendar)
-    
-    elif data.startswith('next_'):
-        _, year, month = data.split('_')
-        calendar = create_calendar(int(year), int(month))
-        await query.edit_message_text("📅 Выбери дату:", reply_markup=calendar)
-    
-    elif data == 'show_calendar':
-        calendar = create_calendar()
-        await query.edit_message_text("📅 Выбери дату:", reply_markup=calendar)
-
-# ========== Обработка кнопок откладывания ==========
-async def snooze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data.startswith('snooze_'):
-        _, reminder_id, minutes = data.split('_')
-        minutes = int(minutes)
-        
-        # Создаём новое напоминание через X минут
-        new_time = datetime.now() + timedelta(minutes=minutes)
-        add_one_time(query.message.chat.id, f"[Отложено] {query.message.text}", new_time)
-        
-        await query.edit_message_text(
-            f"⏰ Напоминание отложено на {minutes} минут.\n"
-            f"Новое время: {new_time.strftime('%H:%M')}"
-        )
-    
-    elif data.startswith('done_'):
-        _, reminder_id = data.split('_')
-        mark_done(int(reminder_id))
-        await query.edit_message_text("✅ Задача выполнена!")
 
 # ========== Показать список ==========
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,27 +272,20 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if one_time:
         msg += "*📅 Одноразовые:*\n"
         for rid, text, rtime in one_time:
-            msg += f"• {rtime[:16]} — {text}\n"
-        msg += "\n"
+            dt = datetime.fromisoformat(rtime)
+            msg += f"• {dt.strftime('%d.%m %H:%M')} — {text}\n"
     
     if recurring:
         msg += "*🔄 Повторяющиеся:*\n"
         for rid, text, pattern, rtime in recurring:
-            if pattern == 'daily':
-                msg += f"• Каждый день в {rtime} — {text}\n"
-            elif pattern == 'weekly':
-                msg += f"• Каждую неделю в {rtime} — {text}\n"
-            elif pattern == 'monthly':
-                msg += f"• Каждый месяц в {rtime} — {text}\n"
-        msg += "\n"
+            msg += f"• {pattern} в {rtime} — {text}\n"
     
     if not one_time and not recurring:
         msg = "📭 У тебя нет активных напоминаний."
     
     await update.message.reply_text(msg, parse_mode="Markdown")
-    return ConversationHandler.END
 
-# ========== Удаление напоминания ==========
+# ========== Удаление ==========
 async def delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     one_time, recurring = get_user_reminders(chat_id)
@@ -488,16 +301,12 @@ async def delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     idx = 1
     for rid, text, rtime in one_time:
-        msg += f"{idx}. 📅 {rtime[:16]} — {text}\n"
+        dt = datetime.fromisoformat(rtime)
+        msg += f"{idx}. 📅 {dt.strftime('%d.%m %H:%M')} — {text}\n"
         idx += 1
     
     for rid, text, pattern, rtime in recurring:
-        if pattern == 'daily':
-            msg += f"{idx}. 🔄 Каждый день в {rtime} — {text}\n"
-        elif pattern == 'weekly':
-            msg += f"{idx}. 🔄 Каждую неделю в {rtime} — {text}\n"
-        elif pattern == 'monthly':
-            msg += f"{idx}. 🔄 Каждый месяц в {rtime} — {text}\n"
+        msg += f"{idx}. 🔄 {pattern} в {rtime} — {text}\n"
         idx += 1
     
     msg += "\n❌ Отправь *0* для отмены"
@@ -518,12 +327,10 @@ async def delete_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
         recurring = context.user_data.get('delete_recurring', [])
         
         if num < len(one_time):
-            # Удаляем одноразовое
             reminder_id = one_time[num][0]
             delete_reminder(reminder_id, is_recurring=False)
             await update.message.reply_text("✅ Напоминание удалено.")
         elif num < len(one_time) + len(recurring):
-            # Удаляем повторяющееся
             rec_idx = num - len(one_time)
             reminder_id = recurring[rec_idx][0]
             delete_reminder(reminder_id, is_recurring=True)
@@ -535,21 +342,73 @@ async def delete_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
+# ========== Обработка кнопок ==========
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "📝 Добавить напоминание":
+        await add_start(update, context)
+        return TEXT
+    elif text == "📋 Мои напоминания":
+        await list_reminders(update, context)
+        return ConversationHandler.END
+    elif text == "❌ Удалить напоминание":
+        return await delete_start(update, context)
+    elif text == "❓ Помощь":
+        await help_command(update, context)
+        return ConversationHandler.END
+    elif text == "🕒 Время сервера":
+        await show_server_time(update, context)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❓ Используй кнопки меню 👇")
+        return ConversationHandler.END
+
+# ========== Обработка колбэков ==========
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data.startswith('snooze_'):
+        _, reminder_id, minutes = data.split('_')
+        minutes = int(minutes)
+        
+        new_time = datetime.now() + timedelta(minutes=minutes)
+        text = query.message.text.replace("⏰ *Напоминание!*\n\n", "")
+        
+        add_one_time(query.message.chat.id, f"[Отложено] {text}", new_time)
+        
+        await query.edit_message_text(
+            f"⏰ Напоминание отложено на {minutes} минут.\n"
+            f"Новое время: {new_time.strftime('%H:%M')}"
+        )
+    
+    elif data.startswith('done_'):
+        _, reminder_id = data.split('_')
+        mark_done(int(reminder_id))
+        await query.edit_message_text("✅ Задача выполнена!")
+
 # ========== Помощь ==========
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 *Как пользоваться:*\n\n"
-        "1️⃣ *Обычное напоминание*\n"
-        "   Нажми «Добавить напоминание» → введи текст → выбери время\n\n"
-        "2️⃣ *Повторяющееся*\n"
-        "   Нажми «Повторяющееся» → напиши текст → укажи периодичность\n\n"
-        "3️⃣ *После напоминания*\n"
-        "   Можно отложить на 5/30/60 минут или отметить выполненным\n\n"
-        "4️⃣ *Календарь*\n"
-        "   При выборе даты можно нажать кнопку и выбрать день",
+        "📚 *Как пользоваться ботом:*\n\n"
+        "1️⃣ *Добавить напоминание*\n"
+        "   Нажми кнопку → введи текст → введи время\n\n"
+        "2️⃣ *Форматы времени*\n"
+        "   • 18:30 — сегодня\n"
+        "   • завтра 10:00\n"
+        "   • через 2 часа\n"
+        "   • 20.03 15:00\n\n"
+        "3️⃣ *Мои напоминания*\n"
+        "   Посмотреть все активные\n\n"
+        "4️⃣ *Удалить*\n"
+        "   Выбрать по номеру\n\n"
+        "5️⃣ *Отложить*\n"
+        "   После напоминания нажми кнопку отложить",
         parse_mode="Markdown"
     )
-    return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Действие отменено.")
@@ -559,7 +418,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(TOKEN).build()
     
-    # Диалоги
+    # Диалог добавления
     conv_add = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📝 Добавить напоминание$'), add_start)],
         states={
@@ -569,15 +428,7 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     
-    conv_recurring = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex('^🔄 Повторяющееся$'), add_recurring_start)],
-        states={
-            TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_text)],
-            RECURRING: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_recurring_parse)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)]
-    )
-    
+    # Диалог удаления
     conv_delete = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^❌ Удалить напоминание$'), delete_start)],
         states={
@@ -589,19 +440,24 @@ def main():
     # Обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.Regex('^📋 Мои напоминания$'), list_reminders))
+    app.add_handler(CommandHandler("time", show_server_time))
+    app.add_handler(CommandHandler("checkdb", check_db))
     app.add_handler(conv_add)
-    app.add_handler(conv_recurring)
     app.add_handler(conv_delete)
     
-    # Callback-запросы
-    app.add_handler(CallbackQueryHandler(calendar_callback, pattern='^(calendar_|prev_|next_|show_calendar)'))
-    app.add_handler(CallbackQueryHandler(snooze_callback, pattern='^(snooze_|done_)'))
+    # Обработчик кнопок
+    app.add_handler(MessageHandler(
+        filters.Regex('^(📝 Добавить напоминание|📋 Мои напоминания|❌ Удалить напоминание|❓ Помощь|🕒 Время сервера)$'), 
+        handle_buttons
+    ))
+    
+    # Обработчик колбэков
+    app.add_handler(CallbackQueryHandler(handle_callback))
     
     # Планировщик
     scheduler.start()
     
-    # Проверяем просроченные напоминания каждые 30 секунд
+    # Проверка каждые 30 секунд
     scheduler.add_job(
         check_reminders,
         trigger=IntervalTrigger(seconds=30),
@@ -609,7 +465,7 @@ def main():
         id='check_reminders'
     )
     
-    print("🤖 Бот с БД и календарём запущен!")
+    logging.info("🤖 Бот-напоминалка запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
