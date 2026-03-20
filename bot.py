@@ -12,13 +12,34 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from apscheduler.triggers.cron import CronTrigger
 
 logging.basicConfig(level=logging.INFO)
 TOKEN = os.environ.get("TOKEN")
 
 if not TOKEN:
     raise Exception("TOKEN не найден!")
+
+# ========== НАСТРОЙКА ВРЕМЕНИ ==========
+# Московское время (UTC+3)
+MSK_OFFSET = timedelta(hours=3)
+
+def now_msk():
+    """Возвращает текущее время по Москве"""
+    return datetime.now() + MSK_OFFSET
+
+def now_utc():
+    """Возвращает текущее время UTC (для БД)"""
+    return datetime.now()
+
+def utc_to_msk(utc_time):
+    """Конвертирует UTC в МСК"""
+    if isinstance(utc_time, str):
+        utc_time = datetime.fromisoformat(utc_time)
+    return utc_time + MSK_OFFSET
+
+def msk_to_utc(msk_time):
+    """Конвертирует МСК в UTC"""
+    return msk_time - MSK_OFFSET
 
 # Состояния для диалогов
 TEXT, TIME, RECURRING = range(3)
@@ -51,22 +72,23 @@ def init_db():
 init_db()
 
 # ========== Работа с БД ==========
-def add_one_time(chat_id, text, remind_time):
+def add_one_time(chat_id, text, remind_time_utc):
+    """Сохраняет напоминание (время в UTC)"""
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
     c.execute("INSERT INTO one_time (chat_id, text, remind_time) VALUES (?, ?, ?)",
-              (chat_id, text, remind_time))
+              (chat_id, text, remind_time_utc))
     reminder_id = c.lastrowid
     conn.commit()
     conn.close()
     return reminder_id
 
 def get_due_reminders():
-    """Возвращает все просроченные напоминания"""
+    """Возвращает все просроченные напоминания (сравнивает по UTC)"""
     conn = sqlite3.connect('reminders.db')
     c = conn.cursor()
-    now = datetime.now()
-    c.execute("SELECT id, chat_id, text FROM one_time WHERE remind_time <= ? AND done = 0", (now,))
+    now_utc = now_utc()
+    c.execute("SELECT id, chat_id, text FROM one_time WHERE remind_time <= ? AND done = 0", (now_utc,))
     due = c.fetchall()
     conn.close()
     return due
@@ -106,8 +128,8 @@ scheduler = AsyncIOScheduler()
 
 async def check_reminders(app):
     """Проверяет и отправляет просроченные напоминания"""
-    now = datetime.now() + MSK_OFFSET = timedelta(hours=3)
-    logging.info(f"🔍 Проверка напоминаний в {now.strftime('%H:%M:%S')}")
+    now_msk_time = now_msk()
+    logging.info(f"🔍 Проверка напоминаний (МСК): {now_msk_time.strftime('%H:%M:%S')}")
     
     due = get_due_reminders()
     logging.info(f"📋 Найдено просроченных: {len(due)}")
@@ -148,6 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⏰ *Бот-напоминалка*\n\n"
         "Я помогу тебе ничего не забыть!\n\n"
+        "📌 *Все время указывай по МОСКВЕ*\n\n"
         "👇 Нажимай кнопки и я проведу тебя шаг за шагом.",
         parse_mode="Markdown",
         reply_markup=reply_markup
@@ -156,11 +179,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== Время сервера ==========
 async def show_server_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now()
+    utc_time = now_utc()
+    msk_time = now_msk()
+    
     await update.message.reply_text(
-        f"🕒 *Время на сервере (UTC):*\n"
-        f"`{now.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-        f"📌 Если твоё время отличается, напоминания могут приходить не вовремя.",
+        f"🕒 *Время на сервере:*\n"
+        f"• UTC: `{utc_time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
+        f"• МСК: `{msk_time.strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
+        f"📌 Напоминания приходят по МСК",
         parse_mode="Markdown"
     )
 
@@ -174,9 +200,11 @@ async def check_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
     
     if one_time:
-        msg = "📋 *Неотправленные напоминания:*\n\n"
+        msg = "📋 *Неотправленные напоминания (в БД в UTC):*\n\n"
         for rid, text, rtime, done in one_time:
-            msg += f"• ID:{rid} | {rtime} — {text[:30]}\n"
+            dt_utc = datetime.fromisoformat(rtime)
+            dt_msk = utc_to_msk(dt_utc)
+            msg += f"• ID:{rid} | {dt_msk.strftime('%d.%m %H:%M')} МСК — {text[:30]}\n"
     else:
         msg = "📭 Нет неотправленных напоминаний"
     
@@ -193,11 +221,11 @@ async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['reminder_text'] = update.message.text
     await update.message.reply_text(
-        "⏰ Теперь напиши *время* в одном из форматов:\n\n"
-        "• `18:30` — сегодня в 18:30\n"
-        "• `завтра 10:00` — завтра в 10:00\n"
-        "• `через 2 часа` — через 2 часа\n"
-        "• `20.03 15:00` — конкретная дата",
+        "⏰ Теперь напиши *время* (по МСК) в одном из форматов:\n\n"
+        "• `18:30` — сегодня в 18:30 МСК\n"
+        "• `завтра 10:00` — завтра в 10:00 МСК\n"
+        "• `через 2 часа` — через 2 часа (МСК)\n"
+        "• `20.03 15:00` — конкретная дата (МСК)",
         parse_mode="Markdown"
     )
     return TIME
@@ -207,7 +235,8 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.lower()
     reminder_text = context.user_data.get('reminder_text', 'Напоминание')
     
-    now = datetime.now()
+    # Текущее время по МСК
+    now = now_msk()
     remind_time = None
     
     # Формат: ЧЧ:ММ
@@ -245,17 +274,18 @@ async def add_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     
     if remind_time:
-        # Сохраняем в БД
-        reminder_id = add_one_time(chat_id, reminder_text, remind_time)
+        # Конвертируем в UTC для сохранения
+        remind_time_utc = msk_to_utc(remind_time)
+        reminder_id = add_one_time(chat_id, reminder_text, remind_time_utc)
         
         await update.message.reply_text(
             f"✅ *Готово!*\n\n"
             f"📝 {reminder_text}\n"
-            f"⏰ {remind_time.strftime('%d.%m.%Y в %H:%M')} (UTC)\n\n"
+            f"⏰ {remind_time.strftime('%d.%m.%Y в %H:%M')} (МСК)\n\n"
             f"💡 Напоминание придет в указанное время",
             parse_mode="Markdown"
         )
-        logging.info(f"✅ Сохранено напоминание #{reminder_id}: {reminder_text} на {remind_time}")
+        logging.info(f"✅ Сохранено напоминание #{reminder_id}: {reminder_text} на {remind_time} МСК ({remind_time_utc} UTC)")
     else:
         await update.message.reply_text("❌ Не понял время. Попробуй ещё раз.")
         return TIME
@@ -267,13 +297,15 @@ async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     one_time, recurring = get_user_reminders(chat_id)
     
-    msg = "📋 *Твои напоминания:*\n\n"
+    msg = "📋 *Твои напоминания (по МСК):*\n\n"
     
     if one_time:
         msg += "*📅 Одноразовые:*\n"
         for rid, text, rtime in one_time:
-            dt = datetime.fromisoformat(rtime)
-            msg += f"• {dt.strftime('%d.%m %H:%M')} — {text}\n"
+            dt_utc = datetime.fromisoformat(rtime)
+            dt_msk = utc_to_msk(dt_utc)
+            msg += f"• {dt_msk.strftime('%d.%m %H:%M')} МСК — {text}\n"
+        msg += "\n"
     
     if recurring:
         msg += "*🔄 Повторяющиеся:*\n"
@@ -301,8 +333,9 @@ async def delete_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     idx = 1
     for rid, text, rtime in one_time:
-        dt = datetime.fromisoformat(rtime)
-        msg += f"{idx}. 📅 {dt.strftime('%d.%m %H:%M')} — {text}\n"
+        dt_utc = datetime.fromisoformat(rtime)
+        dt_msk = utc_to_msk(dt_utc)
+        msg += f"{idx}. 📅 {dt_msk.strftime('%d.%m %H:%M')} МСК — {text}\n"
         idx += 1
     
     for rid, text, pattern, rtime in recurring:
@@ -375,14 +408,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, reminder_id, minutes = data.split('_')
         minutes = int(minutes)
         
-        new_time = datetime.now() + timedelta(minutes=minutes)
+        # Новое время по МСК, потом конвертируем в UTC
+        new_time_msk = now_msk() + timedelta(minutes=minutes)
+        new_time_utc = msk_to_utc(new_time_msk)
+        
         text = query.message.text.replace("⏰ *Напоминание!*\n\n", "")
         
-        add_one_time(query.message.chat.id, f"[Отложено] {text}", new_time)
+        add_one_time(query.message.chat.id, f"[Отложено] {text}", new_time_utc)
         
         await query.edit_message_text(
             f"⏰ Напоминание отложено на {minutes} минут.\n"
-            f"Новое время: {new_time.strftime('%H:%M')}"
+            f"Новое время: {new_time_msk.strftime('%H:%M')} (МСК)"
         )
     
     elif data.startswith('done_'):
@@ -395,12 +431,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 *Как пользоваться ботом:*\n\n"
         "1️⃣ *Добавить напоминание*\n"
-        "   Нажми кнопку → введи текст → введи время\n\n"
-        "2️⃣ *Форматы времени*\n"
-        "   • 18:30 — сегодня\n"
-        "   • завтра 10:00\n"
-        "   • через 2 часа\n"
-        "   • 20.03 15:00\n\n"
+        "   Нажми кнопку → введи текст → введи время (по МСК)\n\n"
+        "2️⃣ *Форматы времени (МСК)*\n"
+        "   • `18:30` — сегодня\n"
+        "   • `завтра 10:00`\n"
+        "   • `через 2 часа`\n"
+        "   • `20.03 15:00`\n\n"
         "3️⃣ *Мои напоминания*\n"
         "   Посмотреть все активные\n\n"
         "4️⃣ *Удалить*\n"
@@ -465,7 +501,7 @@ def main():
         id='check_reminders'
     )
     
-    logging.info("🤖 Бот-напоминалка запущен!")
+    logging.info("🤖 Бот-напоминалка (МСК) запущен!")
     app.run_polling()
 
 if __name__ == "__main__":
